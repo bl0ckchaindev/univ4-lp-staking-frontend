@@ -1,0 +1,83 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 224 30% 5%;
+    --foreground: 210 25% 95%;
+    --card: 224 25% 9%;
+    --card-foreground: 210 25% 95%;
+    --popover: 224 25% 9%;
+    --popover-foreground: 210 25% 95%;
+    --primary: 217 100% 58%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 224 20% 14%;
+    --secondary-foreground: 210 20% 88%;
+    --muted: 224 18% 12%;
+    --muted-foreground: 215 15% 55%;
+    --accent: 217 90% 62%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 210 20% 95%;
+    --border: 224 18% 16%;
+    --input: 224 18% 14%;
+    --ring: 217 100% 58%;
+    --radius: 0.75rem;
+    --glow-primary: 217 100% 58%;
+    --glow-accent: 217 90% 62%;
+    --surface-glass: 224 25% 10%;
+    --sidebar-background: 224 28% 6%;
+    --sidebar-foreground: 210 20% 88%;
+    --sidebar-primary: 217 100% 58%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 224 20% 14%;
+    --sidebar-accent-foreground: 210 20% 88%;
+    --sidebar-border: 224 18% 16%;
+    --sidebar-ring: 217 100% 58%;
+  }
+}
+
+@layer base {
+  * { @apply border-border; }
+  html {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  html::-webkit-scrollbar { display: none; }
+  body { @apply bg-background text-foreground font-body antialiased; }
+}
+
+@layer utilities {
+  .glass {
+    @apply bg-card/70 backdrop-blur-xl border border-border/50 shadow-xl shadow-black/20;
+  }
+  .glass-strong {
+    @apply bg-card/85 backdrop-blur-2xl border border-border/60 shadow-2xl shadow-black/25;
+  }
+  .glow-primary {
+    box-shadow: 0 0 40px -8px hsl(var(--primary) / 0.35), 0 0 80px -16px hsl(var(--primary) / 0.2);
+  }
+  .glow-accent {
+    box-shadow: 0 0 40px -8px hsl(var(--accent) / 0.35), 0 0 80px -16px hsl(var(--accent) / 0.2);
+  }
+  .text-gradient-primary {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--accent)));
+  }
+  .text-gradient-glow {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(90deg, hsl(var(--primary)), hsl(217 100% 68%), hsl(var(--accent)));
+  }
+  .bg-grid {
+    background-image:
+      linear-gradient(hsl(var(--border) / 0.25) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(var(--border) / 0.25) 1px, transparent 1px);
+    background-size: 56px 56px;
+  }
+  .card-hover {
+    @apply transition-all duration-300 hover:border-primary/40 hover:shadow-lg hover:shadow-primary/10;
+  }
+}
