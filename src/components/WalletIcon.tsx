@@ -1,10 +1,10 @@
 import type { ReactNode } from "react";
 
 const WALLET_ICONS: Record<string, string> = {
-  metamask: "/wallets/metamask.svg",
+  metamask: "/wallets/metamask.png",
   coinbase: "/wallets/coinbase.svg",
-  phantom: "/wallets/phantom.svg",
-  trust: "/wallets/trust.svg",
+  phantom: "/wallets/phantom.png",
+  trust: "/wallets/trust.png",
   walletconnect: "/wallets/walletconnect.svg",
 };
 
