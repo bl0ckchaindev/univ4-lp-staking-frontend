@@ -11,11 +11,16 @@ import {
   USDC_DECIMALS_POOL,
 } from "@/lib/poolPrice";
 
+export type PoolPriceResult = {
+  price: number | undefined;
+  sqrtPriceX96: bigint | undefined;
+};
+
 /**
- * Current pool price (USDC per 1 ETH) from on-chain slot0.
- * Returns undefined if vault/pool not configured or pool not initialized.
+ * Current pool price and sqrtPriceX96 from on-chain slot0.
+ * Use price for display; use sqrtPriceX96 with tick range for concentrated liquidity amount math.
  */
-export function usePoolPrice(): number | undefined {
+export function usePoolPrice(): PoolPriceResult {
   const chainId = useChainId();
   const { vault, poolManager } = getContractAddresses(chainId);
 
@@ -42,8 +47,9 @@ export function usePoolPrice(): number | undefined {
     slot0Data == null ||
     slot0Data === "0x0000000000000000000000000000000000000000000000000000000000000000"
   ) {
-    return undefined;
+    return { price: undefined, sqrtPriceX96: undefined };
   }
   const { sqrtPriceX96 } = decodeSlot0(slot0Data as `0x${string}`);
-  return sqrtPriceX96ToPrice(sqrtPriceX96, ETH_DECIMALS_POOL, USDC_DECIMALS_POOL);
+  const price = sqrtPriceX96ToPrice(sqrtPriceX96, ETH_DECIMALS_POOL, USDC_DECIMALS_POOL);
+  return { price, sqrtPriceX96 };
 }

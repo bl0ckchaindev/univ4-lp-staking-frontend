@@ -6,7 +6,9 @@ import {
   RefreshCw, Layers, DollarSign, CheckCircle2
 } from "lucide-react";
 import { Link } from "react-router-dom";
+import { useChainId } from "wagmi";
 import { useVaultStats } from "@/hooks/useVaultStats";
+import { getChainDisplayName } from "@/lib/contracts";
 
 const features = [
   { icon: Shield, title: "MEV Protected", desc: "Your trades are shielded from front-running and sandwich attacks through Uniswap v4 hooks." },
@@ -18,10 +20,12 @@ const features = [
 ];
 
 const Index = () => {
+  const chainId = useChainId();
+  const chainName = getChainDisplayName(chainId);
   const { tvlFormatted, sharePrice, totalSupplyFormatted, totalSupply, hasVault } = useVaultStats();
   const stats = [
-    { icon: DollarSign, label: "Total Value Locked", value: hasVault ? tvlFormatted : "—", change: "Vault assets (18d)", positive: true },
-    { icon: TrendingUp, label: "Share Price", value: sharePrice > 0 ? `$${sharePrice.toFixed(4)}` : "—", change: totalSupply > 0n ? "Live" : "—", positive: true },
+    { icon: DollarSign, label: "Total Value Locked", value: hasVault ? tvlFormatted : "—", change: "In USD", positive: true },
+    { icon: TrendingUp, label: "Share Price", value: sharePrice > 0 ? `$${sharePrice.toFixed(4)}` : "—", change: totalSupply > 0n ? "USD per share" : "—", positive: true },
     { icon: Layers, label: "Total Shares", value: hasVault && totalSupply > 0n ? totalSupplyFormatted : "—", change: "Outstanding", positive: true },
     { icon: Droplets, label: "Pool", value: "ETH/USDC", change: "Uniswap v4", positive: true },
   ];
@@ -42,17 +46,17 @@ const Index = () => {
             >
               <div className="inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/5 px-4 py-1.5 text-xs font-mono text-primary mb-8">
                 <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-                Live on Base · Uniswap v4
+                Live on {chainName} · Uniswap v4
               </div>
 
               <h1 className="font-heading text-5xl md:text-7xl font-bold leading-[1.1] mb-6 tracking-tight">
                 Earn yield on
                 <br />
-                <span className="text-gradient-glow">WETH & USDC</span>
+                <span className="text-gradient-glow">ETH & USDC</span>
               </h1>
 
               <p className="text-lg md:text-xl text-muted-foreground max-w-xl mx-auto mb-10 leading-relaxed">
-                Provide liquidity to the highest-performing pool on Base.
+                Provide liquidity to the ETH/USDC pool on {chainName}.
                 Auto-compounding, MEV-protected, and built on Uniswap v4.
               </p>
 
@@ -143,7 +147,7 @@ const Index = () => {
             </h3>
             <div className="grid md:grid-cols-3 gap-8 text-center">
               {[
-                { step: "01", title: "Deposit", desc: "Add WETH, USDC, or both. Use Zap for single-token entry — we balance it for you.", icon: Zap },
+                { step: "01", title: "Deposit", desc: "Add ETH, USDC, or both. Use Zap for single-token entry — we balance it for you.", icon: Zap },
                 { step: "02", title: "Earn Fees", desc: "Your capital works as Uniswap v4 liquidity. Fees accrue to your position automatically.", icon: Layers },
                 { step: "03", title: "Withdraw Anytime", desc: "Redeem your shares for the underlying tokens whenever you want. No lockups.", icon: TrendingUp },
               ].map((item) => (
@@ -185,7 +189,7 @@ const Index = () => {
             <Droplets className="w-4 h-4 text-primary" />
             AquaVault
           </div>
-          <span className="font-mono text-xs">WETH/USDC · Uniswap v4 · Base</span>
+          <span className="font-mono text-xs">ETH/USDC · Uniswap v4 · {chainName}</span>
         </div>
       </footer>
     </div>

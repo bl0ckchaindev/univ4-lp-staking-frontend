@@ -10,8 +10,12 @@ import { getContractAddresses } from "@/lib/contracts";
 import { vaultAbi } from "@/lib/abis/vault";
 import { zapAbi } from "@/lib/abis/zap";
 import { erc20Abi } from "@/lib/abis/erc20";
+import { positionManagerAbi } from "@/lib/abis/positionManager";
+import { usePoolPrice } from "@/hooks/usePoolPrice";
+import { getAmountsForLiquidity } from "@/lib/poolPrice";
 
 const ETH_DECIMALS = 18;
+/** USDC uses 6 decimals (on-chain standard), not 18. */
 const USDC_DECIMALS = 6;
 
 export function useVault() {
@@ -94,6 +98,24 @@ export function useVault() {
     functionName: "totalStrategyValue",
   });
 
+  const { data: positionTokenId } = useReadContract({
+    address: vault,
+    abi: vaultAbi,
+    functionName: "positionTokenId",
+  });
+  const { data: positionManagerAddress } = useReadContract({
+    address: vault,
+    abi: vaultAbi,
+    functionName: "positionManager",
+  });
+  const { data: positionLiquidity } = useReadContract({
+    address: positionManagerAddress as `0x${string}` | undefined,
+    abi: positionManagerAbi,
+    functionName: "getPositionLiquidity",
+    args: positionTokenId != null && positionTokenId > 0n ? [positionTokenId] : undefined,
+  });
+  const { price: poolPriceNum, sqrtPriceX96 } = usePoolPrice();
+
   const { data: poolKeyData } = useReadContract({
     address: vault,
     abi: vaultAbi,
@@ -123,6 +145,13 @@ export function useVault() {
   const { data: usdcAllowanceZap, refetch: refetchAllowanceZap } = useReadContract({
     address: usdc,
     abi: erc20Abi,
+    functionName: "allowance",
+    args: userAddress && zap ? [userAddress, zap] : undefined,
+  });
+
+  const { data: shareAllowanceZap, refetch: refetchShareAllowanceZap } = useReadContract({
+    address: vault,
+    abi: vaultAbi,
     functionName: "allowance",
     args: userAddress && zap ? [userAddress, zap] : undefined,
   });
@@ -226,6 +255,17 @@ export function useVault() {
     });
   }
 
+  async function approveVaultSharesAsync(spender: `0x${string}`, amount: bigint): Promise<void> {
+    if (!vault || amount === 0n) return;
+    await writeVaultAsync({
+      address: vault,
+      abi: vaultAbi,
+      functionName: "approve",
+      args: [spender, amount],
+    });
+    refetchShareAllowanceZap();
+  }
+
   async function compoundAsync(): Promise<void> {
     if (!vault) return;
     await writeVaultAsync({
@@ -298,17 +338,37 @@ export function useVault() {
     refetchUsdcBalance();
     refetchAllowanceVault();
     refetchAllowanceZap();
+    refetchShareAllowanceZap();
   };
 
+  // Share price in USD: total vault value (ETH*price + USDC) / total supply. Uses position amounts + idle so 1 share = $X.
+  const tickLowerNum = tickLower != null ? Number(tickLower) : null;
+  const tickUpperNum = tickUpper != null ? Number(tickUpper) : null;
+  const [positionEth, positionUsdc] =
+    positionLiquidity != null &&
+    sqrtPriceX96 != null &&
+    sqrtPriceX96 > 0n &&
+    tickLowerNum != null &&
+    tickUpperNum != null &&
+    tickLowerNum < tickUpperNum
+      ? getAmountsForLiquidity(sqrtPriceX96, tickLowerNum, tickUpperNum, positionLiquidity)
+      : [0n, 0n];
+  const totalEth = (idle0 ?? 0n) + positionEth;
+  const totalUsdc = (idle1 ?? 0n) + positionUsdc;
+  const totalValueUSD =
+    poolPriceNum != null && poolPriceNum > 0 && totalSupply != null && totalSupply > 0n
+      ? Number(totalEth) / 1e18 * poolPriceNum + Number(totalUsdc) / 1e6
+      : 0;
   const sharePrice =
-    totalSupply != null && totalSupply > 0n && totalAssets != null
-      ? Number(totalAssets) / Number(totalSupply)
+    totalSupply != null && totalSupply > 0n && totalValueUSD > 0
+      ? totalValueUSD / (Number(totalSupply) / 1e18)
       : 0;
 
   return {
     vault,
     zap,
     usdc,
+    poolKey: poolKeyData ?? undefined,
     totalAssets: totalAssets ?? 0n,
     totalSupply: totalSupply ?? 0n,
     shareBalance: shareBalance ?? 0n,
@@ -321,10 +381,16 @@ export function useVault() {
     tickLower: tickLower ?? 0,
     tickUpper: tickUpper ?? 0,
     totalStrategyValue: totalStrategyValue ?? 0n,
-    poolFee: poolKeyData ? (poolKeyData as { fee: number }).fee : undefined,
+    poolFee:
+      poolKeyData != null
+        ? Number("fee" in poolKeyData ? (poolKeyData as { fee: number | bigint }).fee : (poolKeyData as unknown as unknown[])[2])
+        : undefined,
     ethBalance,
     usdcBalance: usdcBalance ?? 0n,
     sharePrice,
+    positionEth,
+    positionUsdc,
+    totalValueUSD,
     depositAsync,
     depositWithApproval,
     redeem,
@@ -334,6 +400,8 @@ export function useVault() {
     zapInWithUsdcAsync,
     zapInWithUsdcWithApproval,
     zapOut,
+    shareAllowanceZap: shareAllowanceZap ?? 0n,
+    approveVaultSharesAsync,
     compoundAsync,
     refetch,
     isVaultReady: !!vault,

@@ -18,17 +18,24 @@ const POOL_MANAGER_BY_CHAIN: Partial<Record<number, string>> = {
   [sepolia.id]: "0xE03A1074c86CFeDd5C142C4F04F1a1536e203543",
 };
 
+// V4Quoter per chain (optional; set VITE_QUOTER_ADDRESS for zap-out exact quotes)
+const QUOTER_BY_CHAIN: Partial<Record<number, string>> = {
+  [base.id]: "0x0d5e0F971ED27FBfF6c2837bf31316121532048D",
+};
+
 export function getContractAddresses(chainId: number) {
   const vault = import.meta.env.VITE_VAULT_ADDRESS as string | undefined;
   const zap = import.meta.env.VITE_ZAP_ADDRESS as string | undefined;
   const poolManager = (import.meta.env.VITE_POOL_MANAGER_ADDRESS as string | undefined) || POOL_MANAGER_BY_CHAIN[chainId];
   const usdc = (import.meta.env.VITE_USDC_ADDRESS as string | undefined) || USDC_BY_CHAIN[chainId] || USDC_BY_CHAIN[sepolia.id];
+  const quoter = (import.meta.env.VITE_QUOTER_ADDRESS as string | undefined) || QUOTER_BY_CHAIN[chainId];
 
   return {
     vault: vault?.startsWith("0x") ? (vault as `0x${string}`) : undefined,
     zap: zap?.startsWith("0x") ? (zap as `0x${string}`) : undefined,
     poolManager: poolManager?.startsWith("0x") ? (poolManager as `0x${string}`) : undefined,
     usdc: usdc as `0x${string}`,
+    quoter: quoter?.startsWith("0x") ? (quoter as `0x${string}`) : undefined,
   };
 }
 
@@ -36,4 +43,14 @@ export function getDefaultChainId(): number {
   const id = import.meta.env.VITE_CHAIN_ID;
   if (id !== undefined && id !== "") return Number(id);
   return sepolia.id;
+}
+
+const CHAIN_DISPLAY_NAMES: Partial<Record<number, string>> = {
+  [base.id]: "Base",
+  [baseSepolia.id]: "Base Sepolia",
+  [sepolia.id]: "Sepolia",
+};
+
+export function getChainDisplayName(chainId: number): string {
+  return CHAIN_DISPLAY_NAMES[chainId] ?? `Chain ${chainId}`;
 }

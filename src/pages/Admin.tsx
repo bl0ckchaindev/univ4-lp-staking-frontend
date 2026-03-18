@@ -1,234 +1,93 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
-import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import StatCard from "@/components/StatCard";
-import {
-  Shield,
-  Users,
-  RefreshCw,
-  TrendingUp,
-  DollarSign,
-  Plus,
-  Trash2,
-  Settings,
-  Zap,
-  ArrowUpDown,
-  AlertCircle,
-} from "lucide-react";
+import { Users, Settings, Shield, AlertCircle, Info, Play, Copy, Check } from "lucide-react";
 import { useAccount, useChainId, useReadContract, useWriteContract } from "wagmi";
-import { formatUnits, encodeAbiParameters, encodePacked, keccak256, padHex } from "viem";
-import { getContractAddresses } from "@/lib/contracts";
+import { getContractAddresses, supportedChains } from "@/lib/contracts";
 import { vaultAbi } from "@/lib/abis/vault";
 import { poolManagerAbi } from "@/lib/abis/poolManager";
-import { getPriceAtTick } from "@/lib/poolPrice";
-
-const SHARE_DECIMALS = 18;
-const USDC_DECIMALS = 6;
-const WETH_DECIMALS = 18;
-
-function formatShort(value: string): string {
-  const n = parseFloat(value);
-  if (n >= 1e6) return `${(n / 1e6).toFixed(2)}M`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(2)}K`;
-  return n.toFixed(4);
-}
-
-function formatTimeAgo(timestamp: bigint): string {
-  if (timestamp === 0n) return "Never";
-  const sec = Number(timestamp);
-  const now = Math.floor(Date.now() / 1000);
-  const diff = now - sec;
-  if (diff < 60) return "Just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 2592000) return `${Math.floor(diff / 86400)}d ago`;
-  return new Date(sec * 1000).toLocaleDateString();
-}
+import { positionManagerAbi } from "@/lib/abis/positionManager";
+import { getWhitelist, addWhitelistAddress, removeWhitelistAddress } from "@/lib/api";
+import { priceToSqrtPriceX96, getPriceAtTick, getAmountsForLiquidity } from "@/lib/poolPrice";
+import { usePoolPrice } from "@/hooks/usePoolPrice";
 
 const TICK_SPACING = 60;
+const WETH_DECIMALS = 18;
+/** USDC = 6 decimals (not 18). */
+const USDC_DECIMALS = 6;
 
-/**
- * Compute PoolId from poolKey (keccak256(abi.encode(poolKey)) per v4 PoolIdLibrary).
- */
-function getPoolId(poolKey: readonly [`0x${string}`, `0x${string}`, number, number, `0x${string}`]): `0x${string}` {
-  const encoded = encodeAbiParameters(
-    [
-      { type: "address", name: "currency0" },
-      { type: "address", name: "currency1" },
-      { type: "uint24", name: "fee" },
-      { type: "int24", name: "tickSpacing" },
-      { type: "address", name: "hooks" },
-    ],
-    [poolKey[0], poolKey[1], poolKey[2], poolKey[3], poolKey[4]]
-  );
-  return keccak256(encoded as `0x${string}`);
-}
-
-/**
- * Compute storage slot for pool's slot0 in PoolManager (StateLibrary._getPoolStateSlot).
- */
-function getSlot0StorageSlot(poolId: `0x${string}`): `0x${string}` {
-  const packed = encodePacked(
-    ["bytes32", "bytes32"],
-    [poolId, padHex("0x06", { size: 32 })]
-  );
-  return keccak256(packed);
-}
-
-/**
- * Decode slot0 bytes32 from PoolManager: sqrtPriceX96 (160 bits), tick (24 bits signed).
- */
-function decodeSlot0(data: `0x${string}`): { sqrtPriceX96: bigint; tick: number } {
-  const big = BigInt(data);
-  const sqrtPriceX96 = big & ((1n << 160n) - 1n);
-  let tick = Number((big >> 160n) & 0xffffffn);
-  if (tick >= 0x800000) tick -= 0x1000000; // sign-extend 24-bit
-  return { sqrtPriceX96, tick };
-}
-
-/**
- * Convert sqrtPriceX96 to human price (USDC per 1 ETH). price = (sqrtPriceX96/2^96)^2; price_human = price_raw * 10^(decimals0-decimals1).
- * Uses scaled BigInt division to preserve precision.
- */
-function sqrtPriceX96ToPrice(
-  sqrtPriceX96: bigint,
-  decimals0: number,
-  decimals1: number
-): number {
-  if (sqrtPriceX96 <= 0n) return 0;
-  const Q96 = 2n ** 96n;
-  const scale = 10n ** 24n;
-  const rawPriceScaled = (sqrtPriceX96 * sqrtPriceX96 * scale) / (Q96 * Q96);
-  const rawPrice = Number(rawPriceScaled) / Number(scale);
-  const pow = decimals0 - decimals1;
-  const factor = pow >= 0 ? 10 ** pow : 1 / 10 ** -pow;
-  return rawPrice * factor;
-}
-
-/**
- * Raw tick from price (before rounding to tick spacing). price = 1.0001^tick.
- */
-function priceToTickRaw(
-  priceHuman: number,
-  decimals0: number,
-  decimals1: number
-): number {
+function priceToTickRaw(priceHuman: number, decimals0: number, decimals1: number): number {
   if (priceHuman <= 0 || !Number.isFinite(priceHuman)) return 0;
   const pow = decimals1 - decimals0;
   const factor = pow >= 0 ? 10 ** pow : 1 / 10 ** -pow;
   const rawPrice = priceHuman * factor;
   return Math.log(rawPrice) / Math.log(1.0001);
 }
-
-/**
- * Convert human-readable price to Uniswap tick, rounded down to tick spacing (for lower bound).
- */
-function priceToTickLower(
-  priceHuman: number,
-  decimals0: number,
-  decimals1: number,
-  tickSpacing: number
-): number {
-  const raw = priceToTickRaw(priceHuman, decimals0, decimals1);
+function priceToTickLower(priceHuman: number, d0: number, d1: number, tickSpacing: number): number {
+  const raw = priceToTickRaw(priceHuman, d0, d1);
   return Math.floor(raw / tickSpacing) * tickSpacing;
 }
-
-/**
- * Convert human-readable price to Uniswap tick, rounded up to tick spacing (for upper bound).
- */
-function priceToTickUpper(
-  priceHuman: number,
-  decimals0: number,
-  decimals1: number,
-  tickSpacing: number
-): number {
-  const raw = priceToTickRaw(priceHuman, decimals0, decimals1);
+function priceToTickUpper(priceHuman: number, d0: number, d1: number, tickSpacing: number): number {
+  const raw = priceToTickRaw(priceHuman, d0, d1);
   return Math.ceil(raw / tickSpacing) * tickSpacing;
 }
 
-/**
- * Integer square root (floor) using Newton's method.
- */
-function sqrtBigInt(n: bigint): bigint {
-  if (n < 0n) return 0n;
-  if (n < 2n) return n;
-  let x = n;
-  let y = (x + 1n) / 2n;
-  while (y < x) {
-    x = y;
-    y = (x + n / x) / 2n;
+const ASSET_DECIMALS = 18;
+function formatAsset18(value: bigint | undefined): string {
+  if (value == null || value === 0n) return "0";
+  const div = 10n ** BigInt(ASSET_DECIMALS);
+  const int = value / div;
+  const frac = (value % div).toString().padStart(ASSET_DECIMALS, "0").slice(0, 4).replace(/0+$/, "") || "0";
+  return frac ? `${int}.${frac}` : String(int);
+}
+function formatTimestamp(ts: bigint | undefined): string {
+  if (ts == null || ts === 0n) return "—";
+  try {
+    return new Date(Number(ts) * 1000).toLocaleString();
+  } catch {
+    return "—";
   }
-  return x;
+}
+function truncateAddress(addr: string | undefined): string {
+  if (!addr) return "—";
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
-/**
- * Compute sqrtPriceX96 from human-readable price (token1 per token0).
- * Uses BigInt-only math: sqrtPriceX96 = sqrt(price * 10^(decimals1-decimals0) * 2^192).
- * E.g. price 2000 = 1 ETH = 2000 USDC (currency0=ETH 18d, currency1=USDC 6d).
- */
-function priceToSqrtPriceX96(
-  price: number,
-  decimals0: number,
-  decimals1: number
-): bigint {
-  if (price <= 0 || !Number.isFinite(price)) return 0n;
-  const Q96 = 2n ** 96n;
-  const pow = decimals1 - decimals0; // e.g. 6-18 = -12
-  const priceE8 = BigInt(Math.floor(price * 1e8)); // price with 8 decimals to avoid float
-  // rawPrice = price * 10^pow. radicand = rawPrice * Q96^2 = (priceE8/10^8) * 10^pow * Q96^2, kept as integer.
-  // So radicand = priceE8 * 10^pow * Q96^2 / 10^8 = priceE8 * Q96^2 / 10^(8 - pow).
-  const radicand =
-    pow >= 0
-      ? (priceE8 * 10n ** BigInt(pow) * Q96 * Q96) / 10n ** 8n
-      : (priceE8 * Q96 * Q96) / 10n ** BigInt(8 - pow);
-  if (radicand <= 0n) return 0n;
-  return sqrtBigInt(radicand);
+function getChainName(chainId: number): string {
+  return supportedChains.find((c) => c.id === chainId)?.name ?? "Unknown";
 }
 
 const Admin = () => {
   const chainId = useChainId();
   const { address: userAddress, isConnected } = useAccount();
-  const { vault, poolManager } = getContractAddresses(chainId);
+  const { vault, poolManager, zap } = getContractAddresses(chainId);
 
   const [newAddress, setNewAddress] = useState("");
-  const [pullPortionPct, setPullPortionPct] = useState("25");
+  const [pullPct, setPullPct] = useState("25");
   const [priceLower, setPriceLower] = useState("");
   const [priceUpper, setPriceUpper] = useState("");
-  const [initialPrice, setInitialPrice] = useState("");
+  const [initPoolPrice, setInitPoolPrice] = useState("");
   const [feeRecipientInput, setFeeRecipientInput] = useState("");
-  const [managementFeeBpsInput, setManagementFeeBpsInput] = useState("");
-  const [performanceFeeBpsInput, setPerformanceFeeBpsInput] = useState("");
-  const [managementFeeEdited, setManagementFeeEdited] = useState(false);
-  const [performanceFeeEdited, setPerformanceFeeEdited] = useState(false);
+  const [mgmtBps, setMgmtBps] = useState("");
+  const [perfBps, setPerfBps] = useState("");
+  const [whitelistAddresses, setWhitelistAddresses] = useState<string[]>([]);
+  const [whitelistLoading, setWhitelistLoading] = useState(false);
+  const [copiedField, setCopiedField] = useState<"vault" | "positionId" | "feeRecipient" | "hook" | "zap" | null>(null);
+  const lastWhitelistAction = useRef<{ type: "add" | "remove"; address: string } | null>(null);
+
+  const copyToClipboard = async (text: string, field: "vault" | "positionId" | "feeRecipient" | "hook" | "zap") => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedField(field);
+      setTimeout(() => setCopiedField(null), 2000);
+    } catch {}
+  };
 
   const { data: vaultOwner } = useReadContract({
     address: vault,
     abi: vaultAbi,
     functionName: "owner",
-  });
-
-  const isVaultOwner =
-    isConnected &&
-    userAddress &&
-    vaultOwner &&
-    userAddress.toLowerCase() === (vaultOwner as string).toLowerCase();
-
-  const { data: totalAssets } = useReadContract({
-    address: vault,
-    abi: vaultAbi,
-    functionName: "totalAssets",
-  });
-  const { data: totalSupply } = useReadContract({
-    address: vault,
-    abi: vaultAbi,
-    functionName: "totalSupply",
-  });
-  const { data: totalStrategyValue } = useReadContract({
-    address: vault,
-    abi: vaultAbi,
-    functionName: "totalStrategyValue",
   });
   const { data: feeRecipient } = useReadContract({
     address: vault,
@@ -245,234 +104,214 @@ const Admin = () => {
     abi: vaultAbi,
     functionName: "performanceFeeBps",
   });
-  const { data: lastManagementFeeTime } = useReadContract({
-    address: vault,
-    abi: vaultAbi,
-    functionName: "lastManagementFeeTime",
-  });
-  const { data: highWaterMark } = useReadContract({
-    address: vault,
-    abi: vaultAbi,
-    functionName: "highWaterMark",
-  });
   const { data: positionTokenId } = useReadContract({
     address: vault,
     abi: vaultAbi,
     functionName: "positionTokenId",
   });
-  const { data: tickLower } = useReadContract({
-    address: vault,
-    abi: vaultAbi,
-    functionName: "tickLower",
-  });
-  const { data: tickUpper } = useReadContract({
-    address: vault,
-    abi: vaultAbi,
-    functionName: "tickUpper",
-  });
   const { data: isWhitelistedCheck } = useReadContract({
     address: vault,
     abi: vaultAbi,
     functionName: "isWhitelisted",
-    args: newAddress && newAddress.startsWith("0x") && newAddress.length === 42 ? [newAddress as `0x${string}`] : undefined,
+    args: newAddress?.startsWith("0x") && newAddress.length === 42 ? [newAddress as `0x${string}`] : undefined,
   });
-
-  const { data: poolKey } = useReadContract({
+  const { data: totalAssets } = useReadContract({ address: vault, abi: vaultAbi, functionName: "totalAssets" });
+  const { data: totalSupply } = useReadContract({ address: vault, abi: vaultAbi, functionName: "totalSupply" });
+  const { data: highWaterMark } = useReadContract({ address: vault, abi: vaultAbi, functionName: "highWaterMark" });
+  const { data: lastManagementFeeTime } = useReadContract({ address: vault, abi: vaultAbi, functionName: "lastManagementFeeTime" });
+  const { data: tickLower } = useReadContract({ address: vault, abi: vaultAbi, functionName: "tickLower" });
+  const { data: tickUpper } = useReadContract({ address: vault, abi: vaultAbi, functionName: "tickUpper" });
+  const { data: totalStrategyValue } = useReadContract({ address: vault, abi: vaultAbi, functionName: "totalStrategyValue" });
+  const { data: poolKey } = useReadContract({ address: vault, abi: vaultAbi, functionName: "poolKey" });
+  const { data: hookAddress } = useReadContract({ address: vault, abi: vaultAbi, functionName: "hook" });
+  const { data: positionManagerAddress } = useReadContract({
     address: vault,
     abi: vaultAbi,
-    functionName: "poolKey",
+    functionName: "positionManager",
   });
-
-  const poolKeyTuple = poolKey as readonly [`0x${string}`, `0x${string}`, number, number, `0x${string}`] | undefined;
-  const slot0StorageSlot =
-    poolKeyTuple && poolManager ? getSlot0StorageSlot(getPoolId(poolKeyTuple)) : undefined;
-
-  const { data: slot0Data } = useReadContract({
-    address: poolManager,
-    abi: poolManagerAbi,
-    functionName: "extsload",
-    args: slot0StorageSlot ? [slot0StorageSlot] : undefined,
+  const { data: positionLiquidity } = useReadContract({
+    address: positionManagerAddress as `0x${string}` | undefined,
+    abi: positionManagerAbi,
+    functionName: "getPositionLiquidity",
+    args: positionTokenId != null && positionTokenId > 0n ? [positionTokenId] : undefined,
   });
+  const { price: poolPriceNum, sqrtPriceX96 } = usePoolPrice();
 
-  const currentOnChainPrice =
-    slot0Data != null && slot0Data !== "0x0000000000000000000000000000000000000000000000000000000000000000"
-      ? (() => {
-          const { sqrtPriceX96 } = decodeSlot0(slot0Data as `0x${string}`);
-          return sqrtPriceX96ToPrice(sqrtPriceX96, WETH_DECIMALS, USDC_DECIMALS);
-        })()
-      : undefined;
-
-  const { writeContract, status: writeStatus } = useWriteContract();
+  const isVaultOwner =
+    isConnected &&
+    userAddress &&
+    vaultOwner &&
+    userAddress.toLowerCase() === (vaultOwner as string).toLowerCase();
+  const hasPosition = positionTokenId != null && positionTokenId > 0n;
 
   useEffect(() => {
     if (feeRecipient != null && feeRecipient !== "0x0000000000000000000000000000000000000000")
       setFeeRecipientInput((feeRecipient as string) ?? "");
   }, [feeRecipient]);
   useEffect(() => {
-    if (managementFeeBps != null) {
-      setManagementFeeBpsInput(String(managementFeeBps));
-      setManagementFeeEdited(false);
-    }
+    if (managementFeeBps != null) setMgmtBps(String(managementFeeBps));
   }, [managementFeeBps]);
   useEffect(() => {
-    if (performanceFeeBps != null) {
-      setPerformanceFeeBpsInput(String(performanceFeeBps));
-      setPerformanceFeeEdited(false);
-    }
+    if (performanceFeeBps != null) setPerfBps(String(performanceFeeBps));
   }, [performanceFeeBps]);
 
-  const refetch = () => {
-    window.location.reload();
+  const poolInitialized = poolPriceNum != null && poolPriceNum > 0 && Number.isFinite(poolPriceNum);
+  const [positionEth, positionUsdc] =
+    positionLiquidity != null &&
+    sqrtPriceX96 != null &&
+    sqrtPriceX96 > 0n &&
+    tickLower != null &&
+    tickUpper != null &&
+    Number(tickLower) < Number(tickUpper)
+      ? getAmountsForLiquidity(sqrtPriceX96, Number(tickLower), Number(tickUpper), positionLiquidity)
+      : [0n, 0n];
+  const positionEthFormatted =
+    positionEth > 0n
+      ? Number(positionEth) / 1e18 < 0.0001
+        ? (Number(positionEth) / 1e18).toExponential(2)
+        : (Number(positionEth) / 1e18).toLocaleString(undefined, { maximumFractionDigits: 6, minimumFractionDigits: 0 })
+      : null;
+  const positionUsdcFormatted =
+    positionUsdc > 0n
+      ? (Number(positionUsdc) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 0 })
+      : null;
+  const currentPriceLower =
+    tickLower != null && tickUpper != null && Number(tickLower) < Number(tickUpper)
+      ? getPriceAtTick(Number(tickLower), WETH_DECIMALS, USDC_DECIMALS)
+      : null;
+  const currentPriceUpper =
+    tickLower != null && tickUpper != null && Number(tickLower) < Number(tickUpper)
+      ? getPriceAtTick(Number(tickUpper), WETH_DECIMALS, USDC_DECIMALS)
+      : null;
+
+  useEffect(() => {
+    if (poolInitialized && poolPriceNum != null) setInitPoolPrice(poolPriceNum.toFixed(0));
+  }, [poolInitialized, poolPriceNum]);
+  useEffect(() => {
+    if (currentPriceLower != null && currentPriceLower > 0) setPriceLower(currentPriceLower.toFixed(0));
+  }, [currentPriceLower]);
+  useEffect(() => {
+    if (currentPriceUpper != null && currentPriceUpper > 0) setPriceUpper(currentPriceUpper.toFixed(0));
+  }, [currentPriceUpper]);
+
+  const { writeContract, status: writeStatus } = useWriteContract();
+  const isPending = writeStatus === "pending";
+
+  const fetchWhitelist = async () => {
+    try {
+      setWhitelistLoading(true);
+      const list = await getWhitelist();
+      setWhitelistAddresses(list);
+    } catch {
+      setWhitelistAddresses([]);
+    } finally {
+      setWhitelistLoading(false);
+    }
   };
   useEffect(() => {
-    if (writeStatus === "success") refetch();
+    fetchWhitelist();
+  }, []);
+
+  useEffect(() => {
+    if (writeStatus !== "success") return;
+    const action = lastWhitelistAction.current;
+    if (action) {
+      const sync = action.type === "add" ? addWhitelistAddress(action.address) : removeWhitelistAddress(action.address);
+      sync.then(() => fetchWhitelist()).catch(() => {}).finally(() => {
+        lastWhitelistAction.current = null;
+        window.location.reload();
+      });
+    } else {
+      window.location.reload();
+    }
   }, [writeStatus]);
 
-  const totalAssetsFormatted =
-    totalAssets != null ? formatUnits(totalAssets, SHARE_DECIMALS) : "0";
-  const hasPosition = positionTokenId != null && positionTokenId > 0n;
+  const run = (fn: () => void) => {
+    if (!vault || isPending) return;
+    fn();
+  };
 
-  const handleAddWhitelist = () => {
-    if (!vault || !newAddress || !newAddress.startsWith("0x") || newAddress.length !== 42) return;
-    writeContract({
-      address: vault,
-      abi: vaultAbi,
-      functionName: "addToWhitelist",
-      args: [newAddress as `0x${string}`],
+  const handleAddWhitelist = () =>
+    run(() => {
+      if (!newAddress?.startsWith("0x") || newAddress.length !== 42) return;
+      lastWhitelistAction.current = { type: "add", address: newAddress };
+      writeContract({ address: vault!, abi: vaultAbi, functionName: "addToWhitelist", args: [newAddress as `0x${string}`] });
     });
-  };
-  const handleRemoveWhitelist = () => {
-    if (!vault || !newAddress || !newAddress.startsWith("0x") || newAddress.length !== 42) return;
-    writeContract({
-      address: vault,
-      abi: vaultAbi,
-      functionName: "removeFromWhitelist",
-      args: [newAddress as `0x${string}`],
+  const handleRemoveWhitelist = () =>
+    run(() => {
+      if (!newAddress?.startsWith("0x") || newAddress.length !== 42) return;
+      lastWhitelistAction.current = { type: "remove", address: newAddress };
+      writeContract({ address: vault!, abi: vaultAbi, functionName: "removeFromWhitelist", args: [newAddress as `0x${string}`] });
     });
-  };
-  const handleCompound = () => {
-    if (!vault) return;
-    writeContract({ address: vault, abi: vaultAbi, functionName: "compound" });
-  };
+  const handleCompound = () => run(() => writeContract({ address: vault!, abi: vaultAbi, functionName: "compound" }));
+  const handleChargeMgmt = () => run(() => writeContract({ address: vault!, abi: vaultAbi, functionName: "chargeManagementFee" }));
+  const handleChargePerf = () => run(() => writeContract({ address: vault!, abi: vaultAbi, functionName: "chargePerformanceFee" }));
+  const handlePull = () =>
+    run(() => {
+      const pct = parseFloat(pullPct);
+      if (Number.isNaN(pct) || pct <= 0 || pct > 100) return;
+      const portion = BigInt(Math.round((pct / 100) * 1e18));
+      writeContract({ address: vault!, abi: vaultAbi, functionName: "pullLiquidity", args: [portion] });
+    });
+  const handleRebalance = () =>
+    run(() => {
+      const pl = priceLower.trim() ? parseFloat(priceLower) : NaN;
+      const pu = priceUpper.trim() ? parseFloat(priceUpper) : NaN;
+      if (Number.isNaN(pl) || Number.isNaN(pu) || pl <= 0 || pu <= 0 || pl >= pu) return;
+      const tl = priceToTickLower(pl, WETH_DECIMALS, USDC_DECIMALS, TICK_SPACING);
+      const tu = priceToTickUpper(pu, WETH_DECIMALS, USDC_DECIMALS, TICK_SPACING);
+      if (tl >= tu) return;
+      writeContract({ address: vault!, abi: vaultAbi, functionName: "rebalance", args: [tl, tu] });
+    });
+  const handleSetFeeRecipient = () =>
+    run(() => {
+      const r = feeRecipientInput.trim();
+      if (!r.startsWith("0x") || r.length !== 42) return;
+      writeContract({ address: vault!, abi: vaultAbi, functionName: "setFeeRecipient", args: [r as `0x${string}`] });
+    });
+  const handleSetMgmtFee = () =>
+    run(() => {
+      const b = BigInt(mgmtBps);
+      if (b > 2000n) return;
+      writeContract({ address: vault!, abi: vaultAbi, functionName: "setManagementFee", args: [b] });
+    });
+  const handleSetPerfFee = () =>
+    run(() => {
+      const b = BigInt(perfBps);
+      if (b > 5000n) return;
+      writeContract({ address: vault!, abi: vaultAbi, functionName: "setPerformanceFee", args: [b] });
+    });
+
   const handleInitializePool = () => {
-    if (!poolManager || !poolKey) return;
-    const sqrt = computedSqrtPriceX96;
-    if (!sqrt || sqrt <= 0n) return;
-    const key = poolKey as readonly [address: `0x${string}`, address: `0x${string}`, fee: number, tickSpacing: number, hooks: `0x${string}`];
+    if (!poolManager || !poolKey || isPending) return;
+    const price = parseFloat(initPoolPrice);
+    if (Number.isNaN(price) || price <= 0) return;
+    const sqrtPriceX96 = priceToSqrtPriceX96(price, WETH_DECIMALS, USDC_DECIMALS);
+    if (sqrtPriceX96 === 0n) return;
+    const pk = poolKey as readonly [string, string, number, number, string];
+    const key = {
+      currency0: pk[0] as `0x${string}`,
+      currency1: pk[1] as `0x${string}`,
+      fee: pk[2],
+      tickSpacing: pk[3],
+      hooks: pk[4] as `0x${string}`,
+    };
     writeContract({
       address: poolManager,
       abi: poolManagerAbi,
       functionName: "initialize",
-      args: [{ currency0: key[0], currency1: key[1], fee: key[2], tickSpacing: key[3], hooks: key[4] }, sqrt],
+      args: [key, sqrtPriceX96],
     });
-  };
-
-  const priceNum = initialPrice.trim() ? parseFloat(initialPrice) : NaN;
-  const computedSqrtPriceX96 =
-    !Number.isNaN(priceNum) && priceNum > 0
-      ? priceToSqrtPriceX96(priceNum, WETH_DECIMALS, USDC_DECIMALS)
-      : undefined;
-
-  const handleRebalance = () => {
-    if (!vault || rebalanceTickLower == null || rebalanceTickUpper == null) return;
-    if (rebalanceTickLower >= rebalanceTickUpper) return;
-    writeContract({
-      address: vault,
-      abi: vaultAbi,
-      functionName: "rebalance",
-      args: [rebalanceTickLower, rebalanceTickUpper],
-    });
-  };
-
-  const priceLowerNum = priceLower.trim() ? parseFloat(priceLower) : NaN;
-  const priceUpperNum = priceUpper.trim() ? parseFloat(priceUpper) : NaN;
-  const rebalanceTickLower =
-    !Number.isNaN(priceLowerNum) && priceLowerNum > 0
-      ? priceToTickLower(priceLowerNum, WETH_DECIMALS, USDC_DECIMALS, TICK_SPACING)
-      : undefined;
-  const rebalanceTickUpper =
-    !Number.isNaN(priceUpperNum) && priceUpperNum > 0
-      ? priceToTickUpper(priceUpperNum, WETH_DECIMALS, USDC_DECIMALS, TICK_SPACING)
-      : undefined;
-  const handlePullLiquidity = () => {
-    if (!vault) return;
-    const pct = parseFloat(pullPortionPct);
-    if (Number.isNaN(pct) || pct <= 0 || pct > 100) return;
-    const portion = BigInt(Math.round((pct / 100) * 1e18));
-    writeContract({
-      address: vault,
-      abi: vaultAbi,
-      functionName: "pullLiquidity",
-      args: [portion],
-    });
-  };
-  const handleChargeManagementFee = () => {
-    if (!vault) return;
-    writeContract({ address: vault, abi: vaultAbi, functionName: "chargeManagementFee" });
-  };
-  const handleChargePerformanceFee = () => {
-    if (!vault) return;
-    writeContract({ address: vault, abi: vaultAbi, functionName: "chargePerformanceFee" });
-  };
-  const handleUpdateFeeSettings = () => {
-    if (!vault) return;
-    const recipient = feeRecipientInput.trim();
-    const mgmtBps = managementFeeEdited
-      ? managementFeeBpsInput.trim()
-      : managementFeeBps != null
-        ? String(managementFeeBps)
-        : managementFeeBpsInput.trim();
-    const perfBps = performanceFeeEdited
-      ? performanceFeeBpsInput.trim()
-      : performanceFeeBps != null
-        ? String(performanceFeeBps)
-        : performanceFeeBpsInput.trim();
-    if (recipient && recipient.startsWith("0x") && recipient.length === 42) {
-      writeContract({
-        address: vault,
-        abi: vaultAbi,
-        functionName: "setFeeRecipient",
-        args: [recipient as `0x${string}`],
-      });
-      return;
-    }
-    if (mgmtBps) {
-      const bps = BigInt(mgmtBps);
-      if (bps <= 2000n) {
-        writeContract({
-          address: vault,
-          abi: vaultAbi,
-          functionName: "setManagementFee",
-          args: [bps],
-        });
-        return;
-      }
-    }
-    if (perfBps) {
-      const bps = BigInt(perfBps);
-      if (bps <= 5000n) {
-        writeContract({
-          address: vault,
-          abi: vaultAbi,
-          functionName: "setPerformanceFee",
-          args: [bps],
-        });
-      }
-    }
   };
 
   if (!vault) {
     return (
       <div className="min-h-screen pt-24 pb-16 flex items-center justify-center">
-        <div className="glass rounded-2xl p-8 max-w-md text-center">
-          <AlertCircle className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
-          <h2 className="font-heading text-xl font-semibold mb-2">Vault not configured</h2>
-          <p className="text-muted-foreground text-sm mb-4">
-            Set VITE_VAULT_ADDRESS for this chain to use the admin page.
-          </p>
-          <Button asChild variant="glow">
-            <Link to="/">Go home</Link>
-          </Button>
+        <div className="rounded-xl border border-border bg-card p-6 max-w-sm text-center">
+          <AlertCircle className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
+          <h2 className="font-semibold mb-2">Vault not configured</h2>
+          <p className="text-sm text-muted-foreground mb-4">Set VITE_VAULT_ADDRESS for this chain.</p>
+          <Button asChild><Link to="/">Go home</Link></Button>
         </div>
       </div>
     );
@@ -481,15 +320,11 @@ const Admin = () => {
   if (!isConnected) {
     return (
       <div className="min-h-screen pt-24 pb-16 flex items-center justify-center">
-        <div className="glass rounded-2xl p-8 max-w-md text-center">
-          <Shield className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
-          <h2 className="font-heading text-xl font-semibold mb-2">Connect your wallet</h2>
-          <p className="text-muted-foreground text-sm mb-4">
-            You need to connect the vault owner wallet to access the admin page.
-          </p>
-          <Button asChild variant="glow">
-            <Link to="/">Go home</Link>
-          </Button>
+        <div className="rounded-xl border border-border bg-card p-6 max-w-sm text-center">
+          <Shield className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
+          <h2 className="font-semibold mb-2">Connect wallet</h2>
+          <p className="text-sm text-muted-foreground mb-4">Connect the vault owner wallet.</p>
+          <Button asChild><Link to="/">Go home</Link></Button>
         </div>
       </div>
     );
@@ -498,400 +333,311 @@ const Admin = () => {
   if (!isVaultOwner) {
     return (
       <div className="min-h-screen pt-24 pb-16 flex items-center justify-center">
-        <div className="glass rounded-2xl p-8 max-w-md text-center">
-          <Shield className="w-12 h-12 text-destructive mx-auto mb-4" />
-          <h2 className="font-heading text-xl font-semibold mb-2">Access denied</h2>
-          <p className="text-muted-foreground text-sm mb-4">
-            Only the vault owner can access this page. Your wallet is not the vault owner.
-          </p>
-          <Button asChild variant="glow">
-            <Link to="/">Go home</Link>
-          </Button>
+        <div className="rounded-xl border border-border bg-card p-6 max-w-sm text-center">
+          <Shield className="w-10 h-10 text-destructive mx-auto mb-3" />
+          <h2 className="font-semibold mb-2">Access denied</h2>
+          <p className="text-sm text-muted-foreground mb-4">Only the vault owner can access this page.</p>
+          <Button asChild><Link to="/">Go home</Link></Button>
         </div>
       </div>
     );
   }
 
-  const isPending = writeStatus === "pending";
-
   return (
     <div className="min-h-screen pt-24 pb-16">
-      <div className="container max-w-6xl">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="mb-10"
-        >
-          <div className="inline-flex items-center gap-2 glass rounded-full px-4 py-1.5 text-xs font-mono text-muted-foreground mb-4">
-            <Shield className="w-3 h-3 text-primary" />
-            Owner Only
-          </div>
-          <h1 className="font-heading text-3xl md:text-4xl font-bold">
-            Vault <span className="text-gradient-primary">Admin</span>
-          </h1>
-        </motion.div>
+      <div className="container max-w-5xl">
+        <h1 className="text-2xl font-bold mb-6">Vault Admin</h1>
 
-        {/* Admin stats from contract */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-10">
-          <StatCard
-            icon={DollarSign}
-            label="Total AUM (18d)"
-            value={`$${formatShort(totalAssetsFormatted)}`}
-          />
-          <StatCard
-            icon={TrendingUp}
-            label="High water mark (18d)"
-            value={
-              highWaterMark != null && highWaterMark > 0n
-                ? `$${formatShort(formatUnits(highWaterMark, SHARE_DECIMALS))}`
-                : "—"
-            }
-          />
-          <StatCard
-            icon={Users}
-            label="Total supply"
-            value={
-              totalSupply != null && totalSupply > 0n
-                ? formatShort(formatUnits(totalSupply, SHARE_DECIMALS))
-                : "0"
-            }
-          />
-          <StatCard
-            icon={RefreshCw}
-            label="Last mgmt fee"
-            value={
-              lastManagementFeeTime != null
-                ? formatTimeAgo(lastManagementFeeTime)
-                : "—"
-            }
-          />
-        </div>
-
-        <div className="grid lg:grid-cols-2 gap-6">
-          {/* Whitelist management */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.1 }}
-            className="glass rounded-2xl p-6"
-          >
-            <h3 className="font-heading font-semibold text-lg mb-5 flex items-center gap-2">
-              <Users className="w-5 h-5 text-primary" /> Whitelist
-            </h3>
-
-            <div className="flex gap-3 mb-5">
-              <Input
-                placeholder="0x... address"
-                value={newAddress}
-                onChange={(e) => setNewAddress(e.target.value)}
-                className="bg-secondary/50 border-border font-mono text-sm"
-              />
-              <Button
-                variant="glow"
-                size="sm"
-                className="shrink-0"
-                onClick={handleAddWhitelist}
-                disabled={isPending || !newAddress}
-              >
-                <Plus className="w-4 h-4" /> Add
-              </Button>
-              <Button
-                variant="glow-outline"
-                size="sm"
-                className="shrink-0"
-                onClick={handleRemoveWhitelist}
-                disabled={isPending || !newAddress}
-              >
-                <Trash2 className="w-4 h-4" /> Remove
-              </Button>
-            </div>
-            {newAddress && newAddress.startsWith("0x") && newAddress.length === 42 && (
-              <p className="text-xs text-muted-foreground mb-4">
-                <strong>{newAddress.slice(0, 10)}…</strong> is{" "}
-                {isWhitelistedCheck ? "whitelisted" : "not whitelisted"}.
-              </p>
-            )}
-            <p className="text-xs text-muted-foreground">
-              Contract does not expose a list of whitelisted addresses. Use Add/Remove by pasting an address.
-            </p>
-          </motion.div>
-
-          {/* Strategy controls */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.2 }}
-            className="space-y-6"
-          >
-            {/* Create & Initialize Pool (Uniswap v4 PoolManager.initialize) */}
-            <div className="glass rounded-2xl p-6">
-              <h3 className="font-heading font-semibold text-lg mb-3 flex items-center gap-2">
-                <Plus className="w-5 h-5 text-primary" /> Create & Initialize Pool
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Left: Vault info + Whitelist */}
+          <div className="space-y-4">
+            <div className="rounded-xl border border-border bg-card p-4 h-fit">
+              <h3 className="font-semibold text-sm mb-3 flex items-center gap-2">
+                <Users className="w-4 h-4 text-primary" /> Whitelist
               </h3>
-              <p className="text-sm text-muted-foreground mb-4">
-                Initialize the Uniswap v4 pool with the vault&apos;s poolKey. Use once per pool. Fails if pool is already initialized.
-              </p>
-              <div className="space-y-3">
-                <div className="flex flex-wrap gap-3 items-end">
-                  <div className="min-w-[200px]">
-                    <label className="text-sm text-muted-foreground mb-1 block">
-                      Price (USDC per 1 ETH)
-                    </label>
-                    <Input
-                      placeholder="e.g. 2000"
-                      type="number"
-                      step="any"
-                      min="0"
-                      value={initialPrice}
-                      onChange={(e) => setInitialPrice(e.target.value)}
-                      className="font-mono"
-                    />
-                  </div>
-                  <Button
-                    variant="glow"
-                    size="sm"
-                    onClick={handleInitializePool}
-                    disabled={isPending || !computedSqrtPriceX96 || computedSqrtPriceX96 <= 0n || !poolKey || !poolManager}
-                  >
-                    Initialize pool
-                  </Button>
-                </div>
-                {computedSqrtPriceX96 != null && computedSqrtPriceX96 > 0n && (
-                  <div className="space-y-1 text-xs text-muted-foreground font-mono bg-secondary/50 rounded px-3 py-2">
-                    <div className="font-medium text-foreground">
-                      Initialize at: {priceNum > 0 ? `$${priceNum.toLocaleString()} USDC per 1 ETH` : ""}
-                    </div>
-                    <div className="break-all">sqrtPriceX96: {computedSqrtPriceX96.toString()}</div>
-                  </div>
-                )}
+              <div className="flex gap-2">
+                <Input
+                  placeholder="0x... address"
+                  value={newAddress}
+                  onChange={(e) => setNewAddress(e.target.value)}
+                  className="font-mono text-sm flex-1"
+                />
+                <Button size="sm" onClick={handleAddWhitelist} disabled={isPending || !newAddress}>Add</Button>
+                <Button variant="outline" size="sm" onClick={handleRemoveWhitelist} disabled={isPending || !newAddress}>Remove</Button>
               </div>
-              {!poolManager && (
-                <p className="text-xs text-amber-600 dark:text-amber-400 mt-2">
-                  PoolManager not configured. Set VITE_POOL_MANAGER_ADDRESS or use default for this chain.
+              {newAddress && newAddress.startsWith("0x") && newAddress.length === 42 && (
+                <p className="text-xs text-muted-foreground mt-2">
+                  {isWhitelistedCheck ? "Whitelisted" : "Not whitelisted"}
                 </p>
               )}
+              {import.meta.env.VITE_API_URL ? (
+                <div className="mt-3">
+                  <p className="text-xs text-muted-foreground mb-2">Whitelisted users ({whitelistAddresses.length})</p>
+                  {whitelistLoading ? (
+                    <p className="text-xs text-muted-foreground">Loading…</p>
+                  ) : whitelistAddresses.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">No addresses in list. Add via contract above; list syncs from backend.</p>
+                  ) : (
+                    <ul className="text-xs font-mono space-y-1 max-h-60 overflow-y-auto rounded border border-border bg-muted/30 p-2">
+                      {whitelistAddresses.map((addr) => (
+                        <li key={addr} className="truncate" title={addr}>
+                          {addr}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ) : null}
             </div>
 
-            {/* Vault state from contract */}
-            <div className="glass rounded-2xl p-6">
-              <h3 className="font-heading font-semibold text-lg mb-3">Vault state</h3>
-              <div className="grid grid-cols-2 gap-2 text-sm font-mono">
-                <div className="text-muted-foreground">Current ETH price (pool):</div>
-                <div>
-                  {currentOnChainPrice != null && currentOnChainPrice > 0
-                    ? `$${currentOnChainPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC per 1 ETH`
-                    : "—"}
-                </div>
-                <div className="text-muted-foreground">Price range (USDC per 1 ETH):</div>
-                <div>
-                  {tickLower != null && tickUpper != null
-                    ? `$${getPriceAtTick(tickLower, WETH_DECIMALS, USDC_DECIMALS).toFixed(2)} – $${getPriceAtTick(tickUpper, WETH_DECIMALS, USDC_DECIMALS).toFixed(2)}`
-                    : "—"}
-                </div>
-                <div className="text-muted-foreground">Strategy value (18d):</div>
-                <div>{totalStrategyValue != null ? formatUnits(totalStrategyValue, SHARE_DECIMALS) : "—"}</div>
-                <div className="text-muted-foreground">Position ID:</div>
-                <div>{positionTokenId != null ? String(positionTokenId) : "—"}</div>
-                <div className="text-muted-foreground">Tick lower / upper:</div>
-                <div>{tickLower != null && tickUpper != null ? `${tickLower} / ${tickUpper}` : "—"}</div>
-              </div>
-            </div>
-
-            {/* Operations */}
-            <div className="glass rounded-2xl p-6">
-              <h3 className="font-heading font-semibold text-lg mb-5 flex items-center gap-2">
-                <Zap className="w-5 h-5 text-primary" /> Operations
+            <div className="rounded-xl border border-border bg-card p-4 h-fit">
+              <h3 className="font-semibold text-sm mb-3 flex items-center gap-2">
+                <Info className="w-4 h-4 text-primary" /> Vault info
               </h3>
-              <div className="grid grid-cols-2 gap-3">
-                <Button
-                  variant="glow"
-                  className="h-auto py-4 flex-col gap-1"
-                  onClick={handleCompound}
-                  disabled={isPending || !hasPosition}
-                >
-                  <RefreshCw className="w-5 h-5" />
-                  <span className="text-sm">Compound</span>
-                  <span className="text-xs text-primary-foreground/70">Collect & add to idle</span>
-                </Button>
-                <Button variant="glow-outline" className="h-auto py-4 flex-col gap-1" disabled>
-                  <ArrowUpDown className="w-5 h-5" />
-                  <span className="text-sm">Rebalance</span>
-                  <span className="text-xs text-muted-foreground">Use form below</span>
-                </Button>
-                <Button
-                  variant="glass"
-                  className="h-auto py-4 flex-col gap-1"
-                  onClick={handleChargeManagementFee}
-                  disabled={isPending}
-                >
-                  <DollarSign className="w-5 h-5" />
-                  <span className="text-sm">Charge Mgmt Fee</span>
-                  <span className="text-xs text-muted-foreground">
-                    {managementFeeBps != null ? `${Number(managementFeeBps) / 100}%` : "—"} annual
-                  </span>
-                </Button>
-                <Button
-                  variant="glass"
-                  className="h-auto py-4 flex-col gap-1"
-                  onClick={handleChargePerformanceFee}
-                  disabled={isPending}
-                >
-                  <TrendingUp className="w-5 h-5" />
-                  <span className="text-sm">Charge Perf Fee</span>
-                  <span className="text-xs text-muted-foreground">
-                    {performanceFeeBps != null ? `${Number(performanceFeeBps) / 100}%` : "—"} of profit
-                  </span>
-                </Button>
-              </div>
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs [&_dd]:min-h-5 [&_dd]:leading-5">
+                <dt className="text-muted-foreground">Chain</dt>
+                <dd className="font-mono">{getChainName(chainId)}({chainId})</dd>
+                <dt className="text-muted-foreground">Vault</dt>
+                <dd className="font-mono flex items-center gap-1 min-w-0">
+                  <span className="truncate" title={vault ?? undefined}>{truncateAddress(vault ?? undefined)}</span>
+                  {vault && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-5 w-5 shrink-0 p-0 min-h-0"
+                      onClick={() => copyToClipboard(vault, "vault")}
+                      title="Copy address"
+                    >
+                      {copiedField === "vault" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
+                    </Button>
+                  )}
+                </dd>
 
-              <div className="mt-4 space-y-2">
-                <p className="text-xs text-muted-foreground">
-                  Set the liquidity range in ETH price (USDC per 1 ETH). Ticks are computed and rounded to tick spacing 60.
+                <dt className="text-muted-foreground">Fee recipient</dt>
+                <dd className="font-mono flex items-center gap-1 min-w-0">
+                  <span className="truncate" title={feeRecipient as string}>{truncateAddress(feeRecipient as string)}</span>
+                  {feeRecipient && (feeRecipient as string) !== "0x0000000000000000000000000000000000000000" && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-5 w-5 shrink-0 p-0 min-h-0"
+                      onClick={() => copyToClipboard(feeRecipient as string, "feeRecipient")}
+                      title="Copy address"
+                    >
+                      {copiedField === "feeRecipient" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
+                    </Button>
+                  )}
+                </dd>
+                <dt className="text-muted-foreground">Hook</dt>
+                <dd className="font-mono flex items-center gap-1 min-w-0">
+                  <span className="truncate" title={hookAddress as string}>{truncateAddress(hookAddress as string)}</span>
+                  {hookAddress && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-5 w-5 shrink-0 p-0 min-h-0"
+                      onClick={() => copyToClipboard(hookAddress as string, "hook")}
+                      title="Copy address"
+                    >
+                      {copiedField === "hook" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
+                    </Button>
+                  )}
+                </dd>
+                <dt className="text-muted-foreground">Zap</dt>
+                <dd className="font-mono flex items-center gap-1 min-w-0">
+                  <span className="truncate" title={zap ?? undefined}>{truncateAddress(zap ?? undefined)}</span>
+                  {zap && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-5 w-5 shrink-0 p-0 min-h-0"
+                      onClick={() => copyToClipboard(zap, "zap")}
+                      title="Copy address"
+                    >
+                      {copiedField === "zap" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
+                    </Button>
+                  )}
+                </dd>
+                <dt className="text-muted-foreground">Position ID</dt>
+                <dd className="font-mono flex items-center gap-1 min-w-0">
+                  <span>{positionTokenId != null && positionTokenId > 0n ? String(positionTokenId) : "No position"}</span>
+                  {positionTokenId != null && positionTokenId > 0n && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-5 w-5 shrink-0 p-0 min-h-0"
+                      onClick={() => copyToClipboard(String(positionTokenId), "positionId")}
+                      title="Copy position ID"
+                    >
+                      {copiedField === "positionId" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
+                    </Button>
+                  )}
+                </dd>
+                <dt className="text-muted-foreground">Total assets</dt>
+                <dd className="font-mono">{formatAsset18(totalAssets as bigint | undefined)} (18d)</dd>
+                <dt className="text-muted-foreground">Total supply</dt>
+                <dd className="font-mono">{formatAsset18(totalSupply as bigint | undefined)}</dd>
+                <dt className="text-muted-foreground">Strategy value</dt>
+                <dd className="font-mono">{formatAsset18(totalStrategyValue as bigint | undefined)}</dd>
+                <dt className="text-muted-foreground">High water mark</dt>
+                <dd className="font-mono">{formatAsset18(highWaterMark as bigint | undefined)}</dd>
+                <dt className="text-muted-foreground">Last mgmt fee</dt>
+                <dd className="font-mono">{formatTimestamp(lastManagementFeeTime as bigint | undefined)}</dd>
+                <dt className="text-muted-foreground">Current ETH price</dt>
+                <dd className="font-mono">
+                  {poolPriceNum != null && poolPriceNum > 0
+                    ? `$${poolPriceNum.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+                    : "—"}
+                </dd>
+                <dt className="text-muted-foreground">Price range (USDC/ETH)</dt>
+                <dd className="font-mono">
+                  {tickLower != null && tickUpper != null
+                    ? `$${getPriceAtTick(Number(tickLower), WETH_DECIMALS, USDC_DECIMALS).toFixed(2)} ~ $${getPriceAtTick(Number(tickUpper), WETH_DECIMALS, USDC_DECIMALS).toFixed(2)}`
+                    : "—"}
+                </dd>
+                <dt className="text-muted-foreground">ETH in pool</dt>
+                <dd className="font-mono">{positionEthFormatted != null ? `${positionEthFormatted} ETH` : "—"}</dd>
+                <dt className="text-muted-foreground">USDC in pool</dt>
+                <dd className="font-mono">{positionUsdcFormatted != null ? `${positionUsdcFormatted} USDC` : "—"}</dd>
+                <dt className="text-muted-foreground">Mgmt / Perf fee</dt>
+                <dd className="font-mono">{managementFeeBps != null && performanceFeeBps != null ? `${(Number(managementFeeBps) / 100).toFixed(1)}% / ${(Number(performanceFeeBps) / 100).toFixed(1)}%` : "—"}</dd>
+              </dl>
+            </div>
+          </div>
+
+          {/* Right: Admin actions */}
+          <div className="space-y-4">
+            {poolManager && (
+              <div className="rounded-xl border border-border bg-card p-4">
+                <h3 className="font-semibold text-sm mb-3 flex items-center gap-2">
+                  <Play className="w-4 h-4 text-primary" /> Initialize pool
+                </h3>
+                <p className="text-xs text-muted-foreground mb-2">
+                  One-time: create the Uniswap v4 pool at an initial price (no liquidity). Only the vault can add liquidity; do this first, then set tick range and deposit.
                 </p>
-                <div className="flex flex-wrap gap-3 items-end">
-                  <div>
-                    <label className="text-sm text-muted-foreground mb-1 block">Price lower (USDC per 1 ETH)</label>
-                    <Input
-                      placeholder="e.g. 1000"
-                      type="number"
-                      step="any"
-                      min="0"
-                      value={priceLower}
-                      onChange={(e) => setPriceLower(e.target.value)}
-                      className="w-36 font-mono"
-                    />
+                {poolInitialized ? (
+                  <div className="rounded-lg bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+                    Already initialized
                   </div>
-                  <div>
-                    <label className="text-sm text-muted-foreground mb-1 block">Price upper (USDC per 1 ETH)</label>
-                    <Input
-                      placeholder="e.g. 4000"
-                      type="number"
-                      step="any"
-                      min="0"
-                      value={priceUpper}
-                      onChange={(e) => setPriceUpper(e.target.value)}
-                      className="w-36 font-mono"
-                    />
-                  </div>
-                  <Button
-                    variant="glow-outline"
-                    size="sm"
-                    onClick={handleRebalance}
-                    disabled={isPending || rebalanceTickLower == null || rebalanceTickUpper == null || rebalanceTickLower >= rebalanceTickUpper}
-                  >
-                    Rebalance
-                  </Button>
-                </div>
-                {rebalanceTickLower != null && rebalanceTickUpper != null && rebalanceTickLower < rebalanceTickUpper && (
-                  <div className="text-xs text-muted-foreground font-mono bg-secondary/50 rounded px-3 py-2">
-                    Computed ticks: {rebalanceTickLower} to {rebalanceTickUpper}
+                ) : (
+                  <div className="flex gap-2 items-end">
+                    <div className="flex-1 min-w-0">
+                      <label className="text-xs text-muted-foreground block mb-1">Initial price (USDC per 1 ETH)</label>
+                      <Input
+                        type="number"
+                        placeholder="e.g. 3500"
+                        value={initPoolPrice}
+                        onChange={(e) => setInitPoolPrice(e.target.value)}
+                        className="font-mono text-sm"
+                      />
+                    </div>
+                    <Button
+                      size="sm"
+                      onClick={handleInitializePool}
+                      disabled={isPending || !initPoolPrice || parseFloat(initPoolPrice || "0") <= 0 || !poolKey}
+                    >
+                      {isPending ? "Confirm..." : "Initialize pool"}
+                    </Button>
                   </div>
                 )}
               </div>
+            )}
+
+            <div className="rounded-xl border border-border bg-card p-4">
+            <h3 className="font-semibold text-sm mb-3">Actions</h3>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" onClick={handleCompound} disabled={isPending || !hasPosition}>Compound</Button>
+                <Button variant="outline" size="sm" onClick={handleChargeMgmt} disabled={isPending}>Charge Mgmt Fee</Button>
+                <Button variant="outline" size="sm" onClick={handleChargePerf} disabled={isPending}>Charge Perf Fee</Button>
+              </div>
             </div>
 
-            {/* Fee settings from contract */}
-            <div className="glass rounded-2xl p-6">
-              <h3 className="font-heading font-semibold text-lg mb-5 flex items-center gap-2">
-                <Settings className="w-5 h-5 text-primary" /> Fee Settings (from contract)
-              </h3>
-              <div className="space-y-4">
+            <div className="rounded-xl border border-border bg-card p-4">
+              <h3 className="font-semibold text-sm mb-3">Rebalance</h3>
+              <p className="text-xs text-muted-foreground mb-2">Price range (USDC per 1 ETH). Ticks use spacing {TICK_SPACING}.</p>
+              <div className="flex gap-2 items-end">
                 <div>
-                  <label className="text-sm text-muted-foreground mb-1.5 block">Fee Recipient</label>
+                  <label className="text-xs text-muted-foreground block mb-1">Lower</label>
                   <Input
-                    value={feeRecipientInput}
-                    onChange={(e) => setFeeRecipientInput(e.target.value)}
-                    placeholder="0x..."
-                    className="bg-secondary/50 border-border font-mono text-sm"
+                    type="number"
+                    placeholder={currentPriceLower != null ? String(Math.round(currentPriceLower)) : "1000"}
+                    value={priceLower}
+                    onChange={(e) => setPriceLower(e.target.value)}
+                    className="w-24 font-mono text-sm"
                   />
                 </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-sm text-muted-foreground mb-1.5 block">
-                      Management Fee (bps, max 2000)
-                    </label>
-                    {/* <p className="text-xs text-primary/80 font-mono mb-1">
-                      Current from contract: {managementFeeBps != null ? String(managementFeeBps) : "—"} bps
-                      {managementFeeBps != null ? ` (${Number(managementFeeBps) / 100}%)` : ""}
-                    </p> */}
-                    <Input
-                      value={
-                        managementFeeEdited
-                          ? managementFeeBpsInput
-                          : managementFeeBps != null
-                            ? String(managementFeeBps)
-                            : managementFeeBpsInput
-                      }
-                      onChange={(e) => {
-                        setManagementFeeBpsInput(e.target.value);
-                        setManagementFeeEdited(true);
-                      }}
-                      placeholder="e.g. 200"
-                      className="bg-secondary/50 border-border font-mono"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm text-muted-foreground mb-1.5 block">
-                      Performance Fee (bps, max 5000)
-                    </label>
-                    {/* <p className="text-xs text-primary/80 font-mono mb-1">
-                      Current from contract: {performanceFeeBps != null ? String(performanceFeeBps) : "—"} bps
-                      {performanceFeeBps != null ? ` (${Number(performanceFeeBps) / 100}%)` : ""}
-                    </p> */}
-                    <Input
-                      value={
-                        performanceFeeEdited
-                          ? performanceFeeBpsInput
-                          : performanceFeeBps != null
-                            ? String(performanceFeeBps)
-                            : performanceFeeBpsInput
-                      }
-                      onChange={(e) => {
-                        setPerformanceFeeBpsInput(e.target.value);
-                        setPerformanceFeeEdited(true);
-                      }}
-                      placeholder="e.g. 2000"
-                      className="bg-secondary/50 border-border font-mono"
-                    />
-                  </div>
+                <div>
+                  <label className="text-xs text-muted-foreground block mb-1">Upper</label>
+                  <Input
+                    type="number"
+                    placeholder={currentPriceUpper != null ? String(Math.round(currentPriceUpper)) : "4000"}
+                    value={priceUpper}
+                    onChange={(e) => setPriceUpper(e.target.value)}
+                    className="w-24 font-mono text-sm"
+                  />
                 </div>
                 <Button
-                  variant="glow"
-                  className="w-full"
-                  onClick={handleUpdateFeeSettings}
-                  disabled={isPending}
+                  variant="outline"
+                  size="sm"
+                  onClick={handleRebalance}
+                  disabled={isPending || !priceLower || !priceUpper || parseFloat(priceLower) >= parseFloat(priceUpper)}
                 >
-                  Update Fee Settings
+                  Rebalance
                 </Button>
               </div>
             </div>
 
-            {/* Pull Liquidity */}
-            <div className="glass rounded-2xl p-6">
-              <h3 className="font-heading font-semibold text-lg mb-5">Pull Liquidity</h3>
-              <div>
-                <label className="text-sm text-muted-foreground mb-1.5 block">Portion to pull (%)</label>
-                <div className="flex gap-3">
-                  <Input
-                    value={pullPortionPct}
-                    onChange={(e) => setPullPortionPct(e.target.value)}
-                    className="bg-secondary/50 border-border font-mono"
-                  />
-                  <Button
-                    variant="glow-outline"
-                    className="shrink-0"
-                    onClick={handlePullLiquidity}
-                    disabled={isPending || !hasPosition}
-                  >
-                    Pull
-                  </Button>
+            <div className="rounded-xl border border-border bg-card p-4">
+              <h3 className="font-semibold text-sm mb-3">Pull liquidity</h3>
+              <div className="flex gap-2 items-end">
+                <div>
+                  <label className="text-xs text-muted-foreground block mb-1">Portion %</label>
+                  <Input type="number" min="1" max="100" value={pullPct} onChange={(e) => setPullPct(e.target.value)} className="w-20 font-mono text-sm" />
                 </div>
-                <p className="text-xs text-muted-foreground mt-2">
-                  Portion in percent (1–100). Returns liquidity to vault as idle WETH/USDC.
-                </p>
+                <Button variant="outline" size="sm" onClick={handlePull} disabled={isPending || !hasPosition}>Pull</Button>
               </div>
             </div>
-          </motion.div>
+
+            <div className="rounded-xl border border-border bg-card p-4">
+              <h3 className="font-semibold text-sm mb-3 flex items-center gap-2">
+                <Settings className="w-4 h-4 text-primary" /> Fee settings
+              </h3>
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs text-muted-foreground block mb-1">Fee recipient</label>
+                  <div className="flex gap-2 items-center">
+                    <Input placeholder="0x..." value={feeRecipientInput} onChange={(e) => setFeeRecipientInput(e.target.value)} className="font-mono text-sm flex-1" />
+                    <Button variant="outline" size="sm" onClick={handleSetFeeRecipient} disabled={isPending || !feeRecipientInput.trim()}>Set recipient</Button>
+                  </div>
+                </div>
+                <div className="flex gap-4 flex-wrap">
+                  <div className="flex-1 min-w-0">
+                    <label className="text-xs text-muted-foreground block mb-1">Mgmt fee (bps, max 2000)</label>
+                    <div className="flex gap-2 items-center">
+                      <Input placeholder="200" value={mgmtBps} onChange={(e) => setMgmtBps(e.target.value)} className="font-mono text-sm flex-1 min-w-0" />
+                      <Button variant="outline" size="sm" onClick={handleSetMgmtFee} disabled={isPending || !mgmtBps}>Set</Button>
+                    </div>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <label className="text-xs text-muted-foreground block mb-1">Perf fee (bps, max 5000)</label>
+                    <div className="flex gap-2 items-center">
+                      <Input placeholder="2000" value={perfBps} onChange={(e) => setPerfBps(e.target.value)} className="font-mono text-sm flex-1 min-w-0" />
+                      <Button variant="outline" size="sm" onClick={handleSetPerfFee} disabled={isPending || !perfBps}>Set</Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-6 text-center">
+          <Button variant="ghost" asChild><Link to="/vault">Back to Vault</Link></Button>
         </div>
       </div>
     </div>

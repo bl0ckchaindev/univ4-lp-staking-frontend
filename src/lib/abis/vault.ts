@@ -1,6 +1,6 @@
 /**
- * WethUsdcVault ABI – ERC-4626-style vault for WETH/USDC LP.
- * Generated from contract/src/WethUsdcVault.sol
+ * EthUsdcVault ABI – ERC-4626-style vault for ETH/USDC LP (native ETH).
+ * Matches contract/src/EthUsdcVault.sol
  */
 export const vaultAbi = [
     {
