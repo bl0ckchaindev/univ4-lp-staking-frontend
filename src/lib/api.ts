@@ -39,3 +39,51 @@ export async function removeWhitelistAddress(address: string): Promise<void> {
     throw new Error(err.error ?? "Failed to remove from whitelist");
   }
 }
+
+export type SwapVolumeStats = {
+  totalVolumeUsd: number;
+  totalFeesUsd: number;
+  totalFeesEth: number;
+  totalFeesUsdc: number;
+  volume24hUsd: number;
+  fees24hUsd: number;
+  apr: number;
+  swapCount: number;
+  firstSwapTs: number;
+  isLoading?: boolean;
+};
+
+export async function getSwapVolume(
+  poolId: string,
+  chainId: number,
+  ethPriceUsd: number | undefined,
+  tvlUsd: number
+): Promise<Omit<SwapVolumeStats, "isLoading">> {
+  if (!API_BASE) {
+    return {
+      totalVolumeUsd: 0,
+      totalFeesUsd: 0,
+      totalFeesEth: 0,
+      totalFeesUsdc: 0,
+      volume24hUsd: 0,
+      fees24hUsd: 0,
+      apr: 0,
+      swapCount: 0,
+      firstSwapTs: 0,
+    };
+  }
+  const params = new URLSearchParams({
+    poolId,
+    chainId: String(chainId),
+    tvlUsd: String(tvlUsd),
+  });
+  if (ethPriceUsd != null && ethPriceUsd > 0) {
+    params.set("ethPriceUsd", String(ethPriceUsd));
+  }
+  const res = await fetch(`${API_BASE}/swap-volume?${params}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error ?? "Failed to fetch swap volume");
+  }
+  return res.json();
+}

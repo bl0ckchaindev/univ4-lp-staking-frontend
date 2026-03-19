@@ -50,13 +50,13 @@ export function useVault() {
     args: userAddress ? [userAddress] : undefined,
   });
 
-  const { data: idle0 } = useReadContract({
+  const { data: idle0, refetch: refetchIdle0 } = useReadContract({
     address: vault,
     abi: vaultAbi,
     functionName: "idle0",
   });
 
-  const { data: idle1 } = useReadContract({
+  const { data: idle1, refetch: refetchIdle1 } = useReadContract({
     address: vault,
     abi: vaultAbi,
     functionName: "idle1",
@@ -80,43 +80,43 @@ export function useVault() {
     functionName: "owner",
   });
 
-  const { data: tickLower } = useReadContract({
+  const { data: tickLower, refetch: refetchTickLower } = useReadContract({
     address: vault,
     abi: vaultAbi,
     functionName: "tickLower",
   });
 
-  const { data: tickUpper } = useReadContract({
+  const { data: tickUpper, refetch: refetchTickUpper } = useReadContract({
     address: vault,
     abi: vaultAbi,
     functionName: "tickUpper",
   });
 
-  const { data: totalStrategyValue } = useReadContract({
+  const { data: totalStrategyValue, refetch: refetchTotalStrategyValue } = useReadContract({
     address: vault,
     abi: vaultAbi,
     functionName: "totalStrategyValue",
   });
 
-  const { data: positionTokenId } = useReadContract({
+  const { data: positionTokenId, refetch: refetchPositionTokenId } = useReadContract({
     address: vault,
     abi: vaultAbi,
     functionName: "positionTokenId",
   });
-  const { data: positionManagerAddress } = useReadContract({
+  const { data: positionManagerAddress, refetch: refetchPositionManager } = useReadContract({
     address: vault,
     abi: vaultAbi,
     functionName: "positionManager",
   });
-  const { data: positionLiquidity } = useReadContract({
+  const { data: positionLiquidity, refetch: refetchPositionLiquidity } = useReadContract({
     address: positionManagerAddress as `0x${string}` | undefined,
     abi: positionManagerAbi,
     functionName: "getPositionLiquidity",
     args: positionTokenId != null && positionTokenId > 0n ? [positionTokenId] : undefined,
   });
-  const { price: poolPriceNum, sqrtPriceX96 } = usePoolPrice();
+  const { price: poolPriceNum, sqrtPriceX96, refetch: refetchPoolPrice } = usePoolPrice();
 
-  const { data: poolKeyData } = useReadContract({
+  const { data: poolKeyData, refetch: refetchPoolKey } = useReadContract({
     address: vault,
     abi: vaultAbi,
     functionName: "poolKey",
@@ -339,6 +339,16 @@ export function useVault() {
     refetchAllowanceVault();
     refetchAllowanceZap();
     refetchShareAllowanceZap();
+    refetchIdle0();
+    refetchIdle1();
+    refetchTickLower();
+    refetchTickUpper();
+    refetchTotalStrategyValue();
+    refetchPositionTokenId();
+    refetchPositionManager();
+    refetchPositionLiquidity();
+    refetchPoolPrice();
+    refetchPoolKey();
   };
 
   // Share price in USD: total vault value (ETH*price + USDC) / total supply. Uses position amounts + idle so 1 share = $X.

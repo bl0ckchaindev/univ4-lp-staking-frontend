@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import StatCard from "@/components/StatCard";
 import {
-  Droplets, TrendingUp, DollarSign, Percent,
+  TrendingUp, DollarSign, Percent, BarChart3, Activity,
   Plus, Minus, Gift, Info, Zap, ChevronDown
 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -16,6 +16,7 @@ import { getContractAddresses } from "@/lib/contracts";
 import { formatCompact, formatToken } from "@/lib/utils";
 import { getPriceAtTick, getAmount1ForAmount0, getAmount0ForAmount1 } from "@/lib/poolPrice";
 import { toast } from "@/hooks/use-toast";
+import { useSwapVolume } from "@/hooks/useSwapVolume";
 
 const SHARE_DECIMALS = 18;
 
@@ -24,16 +25,18 @@ function toAssets18(amount0Wei: bigint, amount1Raw: bigint): bigint {
   return amount0Wei + amount1Raw * 10n ** 12n; // USDC 6 -> 18
 }
 
+/** Format USDC for input fields — no thousands separator so parseTokenAmount(parseUnits) can parse it. */
 function formatUsdc(value: number): string {
   if (value === 0) return "";
   if (value < 0.01) return value.toFixed(4);
-  return value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  return value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2, useGrouping: false });
 }
 
+/** Format ETH for input fields — no thousands separator so parseTokenAmount(parseUnits) can parse it. */
 function formatEth(value: number): string {
   if (value === 0) return "";
   if (value < 0.0001) return value.toPrecision(4);
-  return value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 6 });
+  return value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 6, useGrouping: false });
 }
 
 const Vault = () => {
@@ -79,6 +82,16 @@ const Vault = () => {
     poolKey,
   } = useVault();
   const { price: poolPriceNum, sqrtPriceX96 } = usePoolPrice();
+
+  const poolKeyTuple = poolKey
+    ? ([poolKey[0], poolKey[1], Number(poolKey[2]), Number(poolKey[3]), poolKey[4]] as const)
+    : undefined;
+  const {
+    totalVolumeUsd, totalFeesUsd, totalFeesEth, totalFeesUsdc,
+    volume24hUsd, fees24hUsd, apr, swapCount,
+    isLoading: volumeLoading,
+  } = useSwapVolume(poolKeyTuple as any, poolPriceNum, totalValueUSD);
+
   const tickLowerNum = tickLower != null ? Number(tickLower) : null;
   const tickUpperNum = tickUpper != null ? Number(tickUpper) : null;
   const hasTickRange =
@@ -303,9 +316,15 @@ const Vault = () => {
   const setWithdrawPct = (pct: number) =>
     setWithdrawAmount((Number(shareBalanceRaw) * (pct / 100)).toFixed(6));
 
+  // Refetch all balances and vault/pool data as soon as a transaction is confirmed
   useEffect(() => {
-    if (vaultWriteStatus === "success" || zapWriteStatus === "success") refetch();
-  }, [vaultWriteStatus, zapWriteStatus, refetch]);
+    if (vaultWriteStatus === "success" || zapWriteStatus === "success" || approveStatus === "success") {
+      refetch();
+      // Refetch again after a short delay in case RPC/indexer is slightly behind
+      const t = setTimeout(() => refetch(), 1500);
+      return () => clearTimeout(t);
+    }
+  }, [vaultWriteStatus, zapWriteStatus, approveStatus, refetch]);
 
   const pendingLabel =
     approveStatus === "pending"
@@ -356,14 +375,14 @@ const Vault = () => {
             positive
           />
           <StatCard
-            icon={Droplets}
-            label="In Pool"
-            value={
-              poolPriceNum != null && poolPriceNum > 0 && (positionEth > 0n || positionUsdc > 0n)
-                ? `$${(Number(positionEth) / 1e18 * poolPriceNum + Number(positionUsdc) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`
-                : "—"
+            icon={Activity}
+            label="Fee APR"
+            value={volumeLoading ? "…" : apr > 0 ? `${apr.toFixed(2)}%` : "—"}
+            change={
+              totalFeesUsd > 0
+                ? `$${totalFeesUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })} earned`
+                : swapCount > 0 ? `${swapCount} swaps` : "No swaps yet"
             }
-            change={positionEth > 0n || positionUsdc > 0n ? "Liquidity value" : "—"}
             positive
           />
         </div>
@@ -701,6 +720,43 @@ const Vault = () => {
                     </div>
                   </div>
 
+                  <div className="rounded-xl border border-border/30 bg-secondary/10 p-4">
+                    <div className="text-sm font-medium mb-1 flex items-center gap-1.5">
+                      <BarChart3 className="w-3.5 h-3.5 text-primary" /> Accumulated trading fees
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      Total LP fees earned from swaps through the pool since deployment, based on on-chain Swap events.
+                    </div>
+                    <div className="flex justify-between mt-3 text-sm">
+                      <span className="text-muted-foreground">ETH fees earned</span>
+                      <span className="font-mono">{volumeLoading ? "…" : totalFeesEth > 0 ? totalFeesEth.toFixed(6) : "0"} ETH</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">USDC fees earned</span>
+                      <span className="font-mono">{volumeLoading ? "…" : totalFeesUsdc > 0 ? totalFeesUsdc.toFixed(4) : "0"} USDC</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Total (USD)</span>
+                      <span className="font-mono text-primary font-semibold">
+                        {volumeLoading ? "…" : totalFeesUsd > 0 ? `$${totalFeesUsd.toLocaleString(undefined, { maximumFractionDigits: 4 })}` : "$0"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-sm mt-2 pt-2 border-t border-border/20">
+                      <span className="text-muted-foreground">Total swaps</span>
+                      <span className="font-mono">{volumeLoading ? "…" : swapCount}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Total volume</span>
+                      <span className="font-mono">{volumeLoading ? "…" : `$${totalVolumeUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Fee APR</span>
+                      <span className="font-mono font-semibold text-primary">
+                        {volumeLoading ? "…" : apr > 0 ? `${apr.toFixed(2)}%` : "—"}
+                      </span>
+                    </div>
+                  </div>
+
                   {isVaultOwner ? (
                     <Button
                       variant="glow"
@@ -742,11 +798,59 @@ const Vault = () => {
                 <div className="flex justify-between"><span className="text-muted-foreground">Pair</span><span className="font-mono">ETH / USDC</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Current ETH price</span><span className="font-mono">{poolPriceNum != null && poolPriceNum > 0 ? `$${poolPriceNum.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "—"}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Price range</span><span className="font-mono text-xs">{tickLower != null && tickUpper != null && tickLower < tickUpper ? `$${getPriceAtTick(Number(tickLower), ETH_DECIMALS, USDC_DECIMALS).toFixed(0)} – $${getPriceAtTick(Number(tickUpper), ETH_DECIMALS, USDC_DECIMALS).toFixed(0)}` : "—"}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">In pool</span><span className="font-mono text-xs">
+                  {poolPriceNum != null && poolPriceNum > 0 && (positionEth > 0n || positionUsdc > 0n)
+                    ? `$${(Number(positionEth) / 1e18 * poolPriceNum + Number(positionUsdc) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+                    : "—"}
+                </span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">ETH in pool</span><span className="font-mono">{positionEth > 0n ? `${formatToken(positionEth, ETH_DECIMALS)} ETH` : "—"}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">USDC in pool</span><span className="font-mono">{positionUsdc > 0n ? `${formatToken(positionUsdc, USDC_DECIMALS)} USDC` : "—"}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Fee Tier</span><span className="font-mono">{poolFee != null ? `${(Number(poolFee) / 10000).toFixed(2)}%` : "—"}</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Network</span><span className="font-mono text-primary">Base</span></div>
                 <div className="flex justify-between"><span className="text-muted-foreground">Protocol</span><span className="font-mono">Uniswap v4</span></div>
+              </div>
+
+              {/* Trading Volume & Fees */}
+              <div className="mt-5 pt-4 border-t border-border/30">
+                <h3 className="font-heading font-semibold text-sm mb-4 flex items-center gap-2 uppercase tracking-wider text-muted-foreground">
+                  <BarChart3 className="w-3.5 h-3.5 text-primary" /> Volume & Fees
+                </h3>
+                <div className="space-y-3 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">24h Volume</span>
+                    <span className="font-mono">
+                      {volumeLoading ? "…" : volume24hUsd > 0 ? `$${volume24hUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "$0"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Total Volume</span>
+                    <span className="font-mono">
+                      {volumeLoading ? "…" : totalVolumeUsd > 0 ? `$${totalVolumeUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "$0"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">24h Fees</span>
+                    <span className="font-mono text-primary">
+                      {volumeLoading ? "…" : fees24hUsd > 0 ? `$${fees24hUsd.toLocaleString(undefined, { maximumFractionDigits: 4 })}` : "$0"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Total Fees</span>
+                    <span className="font-mono text-primary">
+                      {volumeLoading ? "…" : totalFeesUsd > 0 ? `$${totalFeesUsd.toLocaleString(undefined, { maximumFractionDigits: 4 })}` : "$0"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Fee APR</span>
+                    <span className="font-mono font-semibold text-primary">
+                      {volumeLoading ? "…" : apr > 0 ? `${apr.toFixed(2)}%` : "—"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Swaps</span>
+                    <span className="font-mono">{volumeLoading ? "…" : swapCount}</span>
+                  </div>
+                </div>
               </div>
             </motion.div>
           </div>
