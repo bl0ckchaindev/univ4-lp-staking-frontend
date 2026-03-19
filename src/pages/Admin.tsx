@@ -9,7 +9,7 @@ import { vaultAbi } from "@/lib/abis/vault";
 import { poolManagerAbi } from "@/lib/abis/poolManager";
 import { positionManagerAbi } from "@/lib/abis/positionManager";
 import { getWhitelist, addWhitelistAddress, removeWhitelistAddress } from "@/lib/api";
-import { priceToSqrtPriceX96, getPriceAtTick, getAmountsForLiquidity } from "@/lib/poolPrice";
+import { priceToSqrtPriceX96, getPriceAtTick, getAmountsForLiquidity, getPoolId } from "@/lib/poolPrice";
 import { usePoolPrice } from "@/hooks/usePoolPrice";
 
 const TICK_SPACING = 60;
@@ -73,10 +73,10 @@ const Admin = () => {
   const [perfBps, setPerfBps] = useState("");
   const [whitelistAddresses, setWhitelistAddresses] = useState<string[]>([]);
   const [whitelistLoading, setWhitelistLoading] = useState(false);
-  const [copiedField, setCopiedField] = useState<"vault" | "positionId" | "feeRecipient" | "hook" | "zap" | null>(null);
+  const [copiedField, setCopiedField] = useState<"vault" | "positionId" | "poolId" | "feeRecipient" | "hook" | "zap" | null>(null);
   const lastWhitelistAction = useRef<{ type: "add" | "remove"; address: string } | null>(null);
 
-  const copyToClipboard = async (text: string, field: "vault" | "positionId" | "feeRecipient" | "hook" | "zap") => {
+  const copyToClipboard = async (text: string, field: "vault" | "positionId" | "poolId" | "feeRecipient" | "hook" | "zap") => {
     try {
       await navigator.clipboard.writeText(text);
       setCopiedField(field);
@@ -143,6 +143,9 @@ const Admin = () => {
     vaultOwner &&
     userAddress.toLowerCase() === (vaultOwner as string).toLowerCase();
   const hasPosition = positionTokenId != null && positionTokenId > 0n;
+  const poolId = poolKey
+    ? getPoolId(poolKey as readonly [`0x${string}`, `0x${string}`, number, number, `0x${string}`])
+    : undefined;
 
   useEffect(() => {
     if (feeRecipient != null && feeRecipient !== "0x0000000000000000000000000000000000000000")
@@ -475,6 +478,24 @@ const Admin = () => {
                       title="Copy position ID"
                     >
                       {copiedField === "positionId" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
+                    </Button>
+                  )}
+                </dd>
+                <dt className="text-muted-foreground">Pool ID</dt>
+                <dd className="font-mono flex items-center gap-1 min-w-0">
+                  <span className="truncate" title={poolId}>
+                    {poolId ? `${poolId.slice(0, 10)}…${poolId.slice(-8)}` : "—"}
+                  </span>
+                  {poolId && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-5 w-5 shrink-0 p-0 min-h-0"
+                      onClick={() => copyToClipboard(poolId, "poolId")}
+                      title="Copy pool ID (for backend POOL_ID)"
+                    >
+                      {copiedField === "poolId" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
                     </Button>
                   )}
                 </dd>
